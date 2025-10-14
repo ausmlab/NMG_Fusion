@@ -960,71 +960,14 @@ class PointTransformerV3(PointModule):
                     layer.label_embedding = None
                 self.label_embedding = None
 
-    '''
-    def project_pointcloud_to_fixed_grid(self, points, features, r, H, W, x_min, y_min):
-        """
-        Project a point cloud onto the x-y plane with resolution r and fixed grid size.
-        Each grid cell stores the AVERAGE feature of points inside it.
-        Empty cells remain zeros.
-
-        Args:
-            points (torch.Tensor): (N, 3) tensor of point coordinates (x, y, z).
-            features (torch.Tensor): (N, c) tensor of point features.
-            r (float): resolution (grid cell size).
-            H (int): grid height (#cells along y).
-            W (int): grid width (#cells along x).
-
-        Returns:
-            grid_features (torch.Tensor): (H, W, c) feature map.
-            x_edges (torch.Tensor): (W+1,) bin edges along x-axis.
-            y_edges (torch.Tensor): (H+1,) bin edges along y-axis.
-        """
-        assert points.shape[0] == features.shape[0]
-
-        device = points.device
-        N, C = features.shape
-
-        # Extract x, y
-        x, y = points[:, 0], points[:, 1]
-
-        # Compute grid indices
-        ix = ((x - x_min) / r).long()
-        iy = ((y - y_min) / r).long()
-
-        # Filter valid indices (inside grid)
-        mask = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
-        ix, iy, feats = ix[mask], iy[mask], features[mask]
-
-        # Linear index for scatter ops
-        linear_idx = iy * W + ix
-
-        # Accumulate sums with scatter_add
-        grid_sum = torch.zeros((H * W, C), device=device, dtype=features.dtype)
-        grid_count = torch.zeros((H * W, 1), device=device, dtype=features.dtype)
-
-        grid_sum.index_add_(0, linear_idx, feats)
-        grid_count.index_add_(0, linear_idx, torch.ones((linear_idx.shape[0], 1), device=device, dtype=features.dtype))
-
-        # Avoid division by zero: empty cells stay zero
-        grid_features = torch.where(grid_count > 0, grid_sum / grid_count, torch.zeros_like(grid_sum))
-
-        # Reshape back to (H, W, C)
-        grid_features = grid_features.view(H, W, C)
-
-        return grid_features
-    '''
 
     def forward(self, data_dict, w_3d, w_2d):
         point = Point(data_dict)
-        if torch.isnan(point.feat).any() or torch.isinf(point.feat).any():
-            print("NaN/Inf in")
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
         point = self.embedding(point)
-        if torch.isnan(point.feat).any() or torch.isinf(point.feat).any():
-            print("NaN/Inf in")
-
+        
         #point = self.enc(point)
         tokens = []
         for s in range(self.num_stages):
@@ -1042,6 +985,7 @@ class PointTransformerV3(PointModule):
                 #point = self.dec(point)
                 for s in range(self.num_stages - 1):
                     point = self.dec[s](point)
+        
         # 2D Decoder
         if not w_2d == 0 :
             targets = point.target
@@ -1056,7 +1000,6 @@ class PointTransformerV3(PointModule):
                 poss.append(self.position_embedding(feat).to(src.dtype))  ###<--------
                 assert mask is not None
 
-
             if self.dn_number > 0 or targets is not None: # self.dn_number: 100
                 input_query_label, input_query_bbox, attn_mask, dn_meta =\
                     prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale),
@@ -1065,7 +1008,6 @@ class PointTransformerV3(PointModule):
             else:
                 assert targets is None
                 input_query_bbox = input_query_label = attn_mask = dn_meta = None
-
 
             hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(srcs, masks, input_query_bbox, poss, input_query_label, attn_mask)
             # In case num object=0
