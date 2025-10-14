@@ -1,0 +1,20 @@
+# ninja log v7
+78	7940	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/interpolation/interpolation_cuda.o	8cc2d734dc3f6aea
+74	8178	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/ball_query/ball_query_cuda.o	1ffda02e516bbe00
+76	8188	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/grouping/grouping_cuda.o	534d39e7e9c5078e
+86	8342	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/sampling/sampling_cuda.o	723f6f519eba2e5b
+68	8353	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/aggregation/aggregation_cuda.o	298018ba38c52db7
+84	8363	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/random_ball_query/random_ball_query_cuda.o	5f70efe45f3e924d
+88	8374	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/subtraction/subtraction_cuda.o	f6b88a603643073e
+72	8385	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/attention/attention_cuda.o	4ef56e6702b0b736
+81	8591	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/knn_query/knn_query_cuda.o	9fcaf23da834a3eb
+83	21789	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/pointops_api.o	d8c59feceef26f2f
+80	22426	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/interpolation/interpolation_cuda_kernel.o	d01668a5af0d3f55
+85	22681	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/random_ball_query/random_ball_query_cuda_kernel.o	2d765fae1766f375
+82	22702	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/knn_query/knn_query_cuda_kernel.o	a34695c6b2b71ce1
+87	23111	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/sampling/sampling_cuda_kernel.o	4b5b384df82b2b18
+73	23116	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/attention/attention_cuda_kernel.o	d67ba45cdcabad66
+77	23706	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/grouping/grouping_cuda_kernel.o	4439b2e32a1259eb
+89	23751	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/subtraction/subtraction_cuda_kernel.o	2115755b789c1d9c
+75	23852	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/ball_query/ball_query_cuda_kernel.o	6d30110c5dd67cee
+70	24382	1756931075859980051	/nas2/YJ/TMP/Pointcept_turing/libs/pointops/build/temp.linux-x86_64-cpython-38/src/aggregation/aggregation_cuda_kernel.o	dfebb3651bab032c

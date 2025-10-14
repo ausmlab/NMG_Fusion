@@ -1,0 +1,571 @@
+# borrow from https://github.com/open-mmlab/mmrotate/blob/b030f38909fc431be7ecb90772ac30da9da29bcb/mmrotate/models/losses/gaussian_dist_loss_v1.py
+
+import torch, math
+
+
+def safe_logdet(M):
+    M = M.contiguous().to(torch.float32)  # avoid AMP instability
+    try:
+        L = torch.linalg.cholesky(M)
+        return 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1, keepdim=True)
+    except RuntimeError:
+        # fallback if not SPD
+        sign, logdet = torch.linalg.slogdet(M)
+        if not torch.all(sign > 0):
+            raise ValueError("Matrix not positive definite")
+        return logdet.reshape(-1, 1)
+
+
+def xy_wh_r_2_xy_sigma(xywhr):
+    """
+    Convert oriented bounding box to 2-D Gaussian distribution.
+
+    Args:
+        xywhr (torch.Tensor): rbboxes with shape (N, 5).
+
+    Returns:
+        xy (torch.Tensor): center points, shape (N, 2)
+        sigma (torch.Tensor): covariance matrices, shape (N, 2, 2)
+    """
+    _shape = xywhr.shape
+    assert _shape[-1] == 5
+
+    xy = xywhr[..., :2]
+
+    # Clamp width/height to avoid tiny covariances
+    wh = xywhr[..., 2:4].clamp(min=1e-7, max=1e7).reshape(-1, 2)
+    r = xywhr[..., 4]
+
+    cos_r = torch.cos(r)
+    sin_r = torch.sin(r)
+    R = torch.stack((cos_r, -sin_r, sin_r, cos_r), dim=-1).reshape(-1, 2, 2)
+
+    # Diagonal covariance
+    S = 0.5 * torch.diag_embed(wh)
+
+    # Covariance in original orientation
+    # with torch.cuda.amp.autocast(enabled=False):
+    #    sigma = R.bmm(S.square()).bmm(R.transpose(1, 2))
+    # sigma = sigma.reshape(_shape[:-1] + (2, 2))
+    sigma = R.bmm(S.square()).bmm(R.permute(0, 2,
+                                            1)).reshape(_shape[:-1] + (2, 2))
+
+    return xy, sigma
+
+def kld_loss_for_assigning(pred, target, fun='log1p', tau=1.0):
+    """Kullback-Leibler Divergence loss.
+
+    Args:
+        pred (torch.Tensor): Predicted bboxes.
+        target (torch.Tensor): Corresponding gt bboxes.
+        fun (str): The function applied to distance. Defaults to 'log1p'.
+        tau (float): Defaults to 1.0.
+
+    Returns:
+        loss (torch.Tensor)
+    """
+    with torch.cuda.amp.autocast(enabled=False):
+        mu_p, sigma_p = xy_wh_r_2_xy_sigma(pred)
+        mu_t, sigma_t = xy_wh_r_2_xy_sigma(target)
+
+        N, _ = mu_p.shape
+        M, _ = mu_t.shape
+        mu_p = mu_p.unsqueeze(1).repeat(1, M, 1).view(-1, 2)
+        sigma_p = sigma_p.unsqueeze(1).repeat(1, M, 1, 1).view(-1, 2, 2)
+        mu_t = mu_t.unsqueeze(0).repeat(N, 1, 1).view(-1, 2)
+        sigma_t = sigma_t.unsqueeze(0).repeat(N, 1, 1, 1).view(-1, 2, 2)
+        return_shape = [N, M]
+
+        mu_p = mu_p.reshape(-1, 2)
+        mu_t = mu_t.reshape(-1, 2)
+        sigma_p = sigma_p.reshape(-1, 2, 2).float()
+        sigma_t = sigma_t.reshape(-1, 2, 2).float()
+
+        delta = (mu_p - mu_t).unsqueeze(-1)
+        sigma_t_inv = torch.inverse(sigma_t)
+        term1 = delta.transpose(-1,
+                                -2).matmul(sigma_t_inv).matmul(delta).squeeze(-1)
+
+        if (torch.det(sigma_t) <=0).any():
+            print (100*'#')
+            print("Sigma_t determinant non-positive!")
+            print (torch.det(sigma_t).min())
+
+        if (torch.det(sigma_p) <=0).any():
+            print (100*'#')
+            print("Sigma_p determinant non-positive!")
+            print (torch.det(sigma_p).min())
+
+        sigma_p = sigma_p.contiguous().to(torch.float32)
+        sigma_t = sigma_t.contiguous().to(torch.float32)
+
+
+        sign_t, logdet_t = torch.linalg.slogdet(sigma_t)
+        sign_p, logdet_p = torch.linalg.slogdet(sigma_p)
+
+        logdet_t = safe_logdet(sigma_t)
+        logdet_p = safe_logdet(sigma_p)
+        # if you want to be strict: check positive-definiteness
+        if not torch.all(sign_t > 0) or not torch.all(sign_p > 0):
+            raise ValueError("Non-positive definite covariance matrix encountered")
+
+        term2 = (
+            torch.diagonal(sigma_t_inv.matmul(sigma_p), dim1=-2, dim2=-1)
+            .sum(dim=-1, keepdim=True)
+            + (logdet_t - logdet_p).reshape(-1, 1)
+       )
+        
+
+        dis = term1 + term2 - 2
+        kl_dis = dis.clamp(min=1e-6)
+
+        kl_dis = kl_dis.reshape(return_shape)
+
+        if fun == 'sqrt':
+            kl_loss = 1 - 1 / (tau + torch.sqrt(kl_dis))
+        else:
+            kl_loss = 1 - 1 / (tau + torch.log1p(kl_dis))
+        return kl_loss
+
+def kld_loss(pred, target, fun='log1p', tau=1.0):
+    """Kullback-Leibler Divergence loss.
+
+    Args:
+        pred (torch.Tensor): Predicted bboxes.
+        target (torch.Tensor): Corresponding gt bboxes.
+        fun (str): The function applied to distance. Defaults to 'log1p'.
+        tau (float): Defaults to 1.0.
+
+    Returns:
+        loss (torch.Tensor)
+    """
+    with torch.cuda.amp.autocast(enabled=False):
+        mu_p, sigma_p = xy_wh_r_2_xy_sigma(pred)
+        mu_t, sigma_t = xy_wh_r_2_xy_sigma(target)
+
+        mu_p = mu_p.reshape(-1, 2)
+        mu_t = mu_t.reshape(-1, 2)
+        sigma_p = sigma_p.reshape(-1, 2, 2).float()
+        sigma_t = sigma_t.reshape(-1, 2, 2).float()
+
+        delta = (mu_p - mu_t).unsqueeze(-1)
+        sigma_t_inv = torch.inverse(sigma_t)
+        term1 = delta.transpose(-1,
+                                -2).matmul(sigma_t_inv).matmul(delta).squeeze(-1)
+
+        if (torch.det(sigma_t) <=0).any():
+            print (100*'#')
+            print("Sigma_t determinant non-positive!")
+            print (torch.det(sigma_t).min())
+
+        if (torch.det(sigma_p) <=0).any():
+            print (100*'#')
+            print("Sigma_p determinant non-positive!")
+            print (torch.det(sigma_p).min())
+
+
+        #term2 = torch.diagonal(
+        #    sigma_t_inv.matmul(sigma_p),
+        #    dim1=-2, dim2=-1).sum(dim=-1, keepdim=True) + \
+        #    torch.log(torch.det(sigma_t) / torch.linalg.det(sigma_p)).reshape(-1, 1)
+        
+        sign_t, logdet_t = torch.linalg.slogdet(sigma_t)
+        sign_p, logdet_p = torch.linalg.slogdet(sigma_p)
+
+        # if you want to be strict: check positive-definiteness
+        if not torch.all(sign_t > 0) or not torch.all(sign_p > 0):
+            raise ValueError("Non-positive definite covariance matrix encountered")
+
+        term2 = (
+            torch.diagonal(sigma_t_inv.matmul(sigma_p), dim1=-2, dim2=-1)
+            .sum(dim=-1, keepdim=True)
+            + (logdet_t - logdet_p).reshape(-1, 1)
+       )
+
+
+        dis = term1 + term2 - 2
+        kl_dis = dis.clamp(min=1e-6)
+
+        if fun == 'sqrt':
+            kl_loss = 1 - 1 / (tau + torch.sqrt(kl_dis))
+        else:
+            kl_loss = 1 - 1 / (tau + torch.log1p(kl_dis))
+        return kl_loss
+
+
+'''
+def ciou(bboxes1, bboxes2):
+    bboxes1 = torch.sigmoid(bboxes1)
+    bboxes2 = torch.sigmoid(bboxes2)
+    rows = bboxes1.shape[0]
+    cols = bboxes2.shape[0]
+    cious = torch.zeros((rows, cols))
+    if rows * cols == 0:
+        return cious
+    exchange = False
+    if bboxes1.shape[0] > bboxes2.shape[0]:
+        bboxes1, bboxes2 = bboxes2, bboxes1
+        cious = torch.zeros((cols, rows))
+        exchange = True
+    w1 = torch.exp(bboxes1[:, 2])
+    h1 = torch.exp(bboxes1[:, 3])
+    w2 = torch.exp(bboxes2[:, 2])
+    h2 = torch.exp(bboxes2[:, 3])
+    area1 = w1 * h1
+    area2 = w2 * h2
+    center_x1 = bboxes1[:, 0]
+    center_y1 = bboxes1[:, 1]
+    center_x2 = bboxes2[:, 0]
+    center_y2 = bboxes2[:, 1]
+
+    inter_l = torch.max(center_x1 - w1 / 2,center_x2 - w2 / 2)
+    inter_r = torch.min(center_x1 + w1 / 2,center_x2 + w2 / 2)
+    inter_t = torch.max(center_y1 - h1 / 2,center_y2 - h2 / 2)
+    inter_b = torch.min(center_y1 + h1 / 2,center_y2 + h2 / 2)
+    inter_area = torch.clamp((inter_r - inter_l),min=0) * torch.clamp((inter_b - inter_t),min=0)
+
+    c_l = torch.min(center_x1 - w1 / 2,center_x2 - w2 / 2)
+    c_r = torch.max(center_x1 + w1 / 2,center_x2 + w2 / 2)
+    c_t = torch.min(center_y1 - h1 / 2,center_y2 - h2 / 2)
+    c_b = torch.max(center_y1 + h1 / 2,center_y2 + h2 / 2)
+
+    inter_diag = (center_x2 - center_x1)**2 + (center_y2 - center_y1)**2
+    c_diag = torch.clamp((c_r - c_l),min=0)**2 + torch.clamp((c_b - c_t),min=0)**2
+
+    union = area1+area2-inter_area
+    u = (inter_diag) / c_diag
+    iou = inter_area / union
+    v = (4 / (math.pi ** 2)) * torch.pow((torch.atan(w2 / h2) - torch.atan(w1 / h1)), 2)
+    with torch.no_grad():
+        S = (iou>0.5).float()
+        alpha= S*v/(1-iou+v)
+    cious = iou - u - alpha * v
+    cious = torch.clamp(cious,min=-1.0,max = 1.0)
+    if exchange:
+        cious = cious.T
+    return 1-cious
+
+def diou(bboxes1, bboxes2):
+    bboxes1 = torch.sigmoid(bboxes1)
+    bboxes2 = torch.sigmoid(bboxes2)
+    rows = bboxes1.shape[0]
+    cols = bboxes2.shape[0]
+    cious = torch.zeros((rows, cols))
+    if rows * cols == 0:
+        return cious
+    exchange = False
+    if bboxes1.shape[0] > bboxes2.shape[0]:
+        bboxes1, bboxes2 = bboxes2, bboxes1
+        cious = torch.zeros((cols, rows))
+        exchange = True
+    w1 = torch.exp(bboxes1[:, 2])
+    h1 = torch.exp(bboxes1[:, 3])
+    w2 = torch.exp(bboxes2[:, 2])
+    h2 = torch.exp(bboxes2[:, 3])
+    area1 = w1 * h1
+    area2 = w2 * h2
+    center_x1 = bboxes1[:, 0]
+    center_y1 = bboxes1[:, 1]
+    center_x2 = bboxes2[:, 0]
+    center_y2 = bboxes2[:, 1]
+
+    inter_l = torch.max(center_x1 - w1 / 2,center_x2 - w2 / 2)
+    inter_r = torch.min(center_x1 + w1 / 2,center_x2 + w2 / 2)
+    inter_t = torch.max(center_y1 - h1 / 2,center_y2 - h2 / 2)
+    inter_b = torch.min(center_y1 + h1 / 2,center_y2 + h2 / 2)
+    inter_area = torch.clamp((inter_r - inter_l),min=0) * torch.clamp((inter_b - inter_t),min=0)
+
+    c_l = torch.min(center_x1 - w1 / 2,center_x2 - w2 / 2)
+    c_r = torch.max(center_x1 + w1 / 2,center_x2 + w2 / 2)
+    c_t = torch.min(center_y1 - h1 / 2,center_y2 - h2 / 2)
+    c_b = torch.max(center_y1 + h1 / 2,center_y2 + h2 / 2)
+
+    inter_diag = (center_x2 - center_x1)**2 + (center_y2 - center_y1)**2
+    c_diag = torch.clamp((c_r - c_l),min=0)**2 + torch.clamp((c_b - c_t),min=0)**2
+
+    union = area1+area2-inter_area
+    u = (inter_diag) / c_diag
+    iou = inter_area / union
+    dious = iou - u
+    dious = torch.clamp(dious,min=-1.0,max = 1.0)
+    if exchange:
+        dious = dious.T
+    return 1-dious
+
+
+def xy_wh_r_2_xy_sigma_unstable(xywhr):
+    """Convert oriented bounding box to 2-D Gaussian distribution.
+
+    Args:
+        xywhr (torch.Tensor): rbboxes with shape (N, 5).
+
+    Returns:
+        xy (torch.Tensor): center point of 2-D Gaussian distribution
+            with shape (N, 2).
+        sigma (torch.Tensor): covariance matrix of 2-D Gaussian distribution
+            with shape (N, 2, 2).
+    """
+    _shape = xywhr.shape
+    assert _shape[-1] == 5
+    xy = xywhr[..., :2]
+    wh = xywhr[..., 2:4].clamp(min=1e-7, max=1e7).reshape(-1, 2)
+    r = xywhr[..., 4]
+    cos_r = torch.cos(r)
+    sin_r = torch.sin(r)
+    R = torch.stack((cos_r, -sin_r, sin_r, cos_r), dim=-1).reshape(-1, 2, 2)
+    S = 0.5 * torch.diag_embed(wh)
+    with torch.cuda.amp.autocast(enabled=False):
+        sigma = R.bmm(S.square()).bmm(R.permute(0, 2, 1)).reshape(_shape[:-1] + (2, 2))
+
+    return xy, sigma
+
+
+def postprocess(distance, fun='log1p', tau=1.0):
+    """Convert distance to loss.
+
+    Args:
+        distance (torch.Tensor)
+        fun (str, optional): The function applied to distance.
+            Defaults to 'log1p'.
+        tau (float, optional): Defaults to 1.0.
+
+    Returns:
+        loss (torch.Tensor)
+    """
+    if fun == 'log1p':
+        distance = torch.log1p(distance)
+        if torch.isnan(distance).any() or torch.isinf(distance).any():
+            print("NaN/Inf in")
+    elif fun == 'sqrt':
+        distance = torch.sqrt(distance.clamp(1e-7))
+    elif fun == 'none':
+        pass
+    else:
+        raise ValueError(f'Invalid non-linear function {fun}')
+
+    if tau >= 1.0:
+        return 1 - 1 / (tau + distance + 1e-7)
+    else:
+        return distance
+
+def kld_loss_RHINO(pred, target, fun='log1p', tau=1.0, alpha=1.0, sqrt=True):
+    """Kullback-Leibler Divergence loss.
+
+    Args:
+        pred (torch.Tensor): Predicted bboxes.
+        target (torch.Tensor): Corresponding gt bboxes.
+        fun (str): The function applied to distance. Defaults to 'log1p'.
+        tau (float): Defaults to 1.0.
+        alpha (float): Defaults to 1.0.
+        sqrt (bool): Whether to sqrt the distance. Defaults to True.
+
+    Returns:
+        loss (torch.Tensor)
+    """
+    xy_p, Sigma_p = xy_wh_r_2_xy_sigma(pred)
+    xy_t, Sigma_t = xy_wh_r_2_xy_sigma(target)
+
+    _shape = xy_p.shape
+
+    xy_p = xy_p.reshape(-1, 2)
+    xy_t = xy_t.reshape(-1, 2)
+    Sigma_p = Sigma_p.reshape(-1, 2, 2)
+    Sigma_t = Sigma_t.reshape(-1, 2, 2)
+
+    Sigma_p_inv = torch.stack((Sigma_p[..., 1, 1], -Sigma_p[..., 0, 1],
+                               -Sigma_p[..., 1, 0], Sigma_p[..., 0, 0]),
+                              dim=-1).reshape(-1, 2, 2)
+    Sigma_p_inv = Sigma_p_inv / Sigma_p.det().unsqueeze(-1).unsqueeze(-1)
+
+    dxy = (xy_p - xy_t).unsqueeze(-1)
+    xy_distance = 0.5 * dxy.permute(0, 2, 1).bmm(Sigma_p_inv).bmm(dxy).view(-1)
+
+    whr_distance = 0.5 * Sigma_p_inv.bmm(Sigma_t).diagonal(
+        dim1=-2, dim2=-1).sum(dim=-1)
+
+    Sigma_p_det_log = Sigma_p.det().log()
+    Sigma_t_det_log = Sigma_t.det().log()
+    whr_distance = whr_distance + 0.5 * (Sigma_p_det_log - Sigma_t_det_log)
+    whr_distance = whr_distance - 1
+    distance = (xy_distance / (alpha * alpha) + whr_distance)
+    if sqrt:
+        distance = distance.clamp(1e-7).sqrt()
+
+    distance = distance.reshape(_shape[:-1])
+
+    return postprocess(distance, fun=fun, tau=tau)
+
+def kld_loss_new(pred, target, fun='log1p', tau=1.0, alpha=1.0, sqrt=True, eps=1e-6):
+    """
+    Numerically stable Kullback-Leibler Divergence loss between 2D Gaussians.
+
+    Args:
+        pred (torch.Tensor): Predicted bboxes.
+        target (torch.Tensor): Corresponding gt bboxes.
+        fun (str): The function applied to distance. Defaults to 'log1p'.
+        tau (float): Defaults to 1.0.
+        alpha (float): Defaults to 1.0.
+        sqrt (bool): Whether to sqrt the distance. Defaults to True.
+
+    Returns:
+        loss (torch.Tensor)
+    """
+    xy_p, Sigma_p = xy_wh_r_2_xy_sigma(pred)
+    xy_t, Sigma_t = xy_wh_r_2_xy_sigma(target)
+
+    _shape = xy_p.shape
+    xy_p = xy_p.reshape(-1, 2)
+    xy_t = xy_t.reshape(-1, 2)
+    Sigma_p = Sigma_p.reshape(-1, 2, 2)
+    Sigma_t = Sigma_t.reshape(-1, 2, 2)
+
+    # --- Regularize to ensure SPD ---
+    I = torch.eye(2, device=Sigma_p.device)
+    Sigma_p = Sigma_p + eps * I
+    Sigma_t = Sigma_t + eps * I
+
+    # --- Stable inverse ---
+    Sigma_p_inv = torch.linalg.inv(Sigma_p)
+
+    # --- Mahalanobis distance ---
+    dxy = (xy_p - xy_t).unsqueeze(-1)
+    xy_distance = 0.5 * dxy.transpose(1, 2).bmm(Sigma_p_inv).bmm(dxy).view(-1)
+
+    # --- Trace term ---
+    whr_distance = 0.5 * Sigma_p_inv.bmm(Sigma_t).diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+
+    # --- Stable logdet ---
+    sign_p, logabsdet_p = torch.linalg.slogdet(Sigma_p)
+    sign_t, logabsdet_t = torch.linalg.slogdet(Sigma_t)
+
+    # Replace invalid determinants with large penalty
+    large_penalty = torch.tensor(1e6, device=Sigma_p.device)
+    Sigma_p_det_log = torch.where(sign_p > 0, logabsdet_p, large_penalty)
+    Sigma_t_det_log = torch.where(sign_t > 0, logabsdet_t, large_penalty)
+
+    whr_distance = whr_distance + 0.5 * (Sigma_p_det_log - Sigma_t_det_log)
+    whr_distance = whr_distance - 1
+
+    # --- Total distance ---
+    distance = xy_distance / (alpha * alpha) + whr_distance
+
+    if sqrt:
+        distance = distance.clamp_min(1e-7).sqrt()
+
+    # --- Safe log1p for postprocess ---
+    if fun == 'log1p':
+        distance = torch.clamp(distance, min=-1 + eps)
+
+    distance = distance.reshape(_shape[:-1])
+
+    return postprocess(distance, fun=fun, tau=tau)
+
+def kld_loss_for_assigning_new(pred, target, fun='log1p', tau=1.0, alpha=1., sqrt=True):
+    xy_1, Sigma_1 = xy_wh_r_2_xy_sigma(pred)
+    xy_2, Sigma_2 = xy_wh_r_2_xy_sigma(target)
+
+    N, _ = xy_1.shape
+    M, _ = xy_2.shape
+    xy_1 = xy_1.unsqueeze(1).repeat(1, M, 1).view(-1, 2)
+    Sigma_1 = Sigma_1.unsqueeze(1).repeat(1, M, 1, 1).view(-1, 2, 2)
+    xy_2 = xy_2.unsqueeze(0).repeat(N, 1, 1).view(-1, 2)
+    Sigma_2 = Sigma_2.unsqueeze(0).repeat(N, 1, 1, 1).view(-1, 2, 2)
+    return_shape = [N, M]
+
+    # --- Add jitter to ensure SPD ---
+    eps = 1e-6
+    I = torch.eye(2, device=Sigma_1.device)
+    Sigma_1 = Sigma_1 + eps * I
+    Sigma_2 = Sigma_2 + eps * I
+
+    # Inverse via adjugate / det
+    Sigma_1_inv = torch.stack((Sigma_1[..., 1, 1], -Sigma_1[..., 0, 1],
+                               -Sigma_1[..., 1, 0], Sigma_1[..., 0, 0]),
+                              dim=-1).reshape(-1, 2, 2)
+    Sigma_1_inv = Sigma_1_inv / Sigma_1.det().unsqueeze(-1).unsqueeze(-1)
+
+    dxy = (xy_1 - xy_2).unsqueeze(-1)
+    xy_distance = 0.5 * dxy.permute(0, 2, 1).bmm(Sigma_1_inv).bmm(dxy).view(-1)
+
+    whr_distance = 0.5 * Sigma_1_inv.bmm(Sigma_2).diagonal(
+        dim1=-2, dim2=-1).sum(dim=-1)
+
+    # --- Stable logdet ---
+    sign1, logabsdet1 = torch.linalg.slogdet(Sigma_1)
+    sign2, logabsdet2 = torch.linalg.slogdet(Sigma_2)
+
+    # if sign <= 0, replace with a large penalty instead of NaN
+    invalid_penalty = torch.tensor(float('inf'), device=Sigma_1.device)
+    Sigma_1_det_log = torch.where(sign1 > 0, logabsdet1, invalid_penalty)
+    Sigma_2_det_log = torch.where(sign2 > 0, logabsdet2, invalid_penalty)
+
+    whr_distance = whr_distance + 0.5 * (Sigma_1_det_log - Sigma_2_det_log)
+    whr_distance = whr_distance - 1
+    distance = (xy_distance / (alpha * alpha) + whr_distance)
+
+    if sqrt:
+        distance = distance.clamp_min(1e-7).sqrt()
+    distance = distance.reshape(return_shape)
+
+    return postprocess(distance, fun=fun, tau=tau)
+
+def kld_loss_for_assigning_RHINO(pred, target, fun='log1p', tau=1.0, alpha=1., sqrt=True):
+
+    xy_1, Sigma_1 = xy_wh_r_2_xy_sigma(pred)
+    xy_2, Sigma_2 = xy_wh_r_2_xy_sigma(target)
+
+    N, _ = xy_1.shape
+    M, _ = xy_2.shape
+    xy_1 = xy_1.unsqueeze(1).repeat(1, M, 1).view(-1, 2)
+    Sigma_1 = Sigma_1.unsqueeze(1).repeat(1, M, 1, 1).view(-1, 2, 2)
+    xy_2 = xy_2.unsqueeze(0).repeat(N, 1, 1).view(-1, 2)
+    Sigma_2 = Sigma_2.unsqueeze(0).repeat(N, 1, 1, 1).view(-1, 2, 2)
+    return_shape = [N, M]
+
+    Sigma_1_inv = torch.stack((Sigma_1[..., 1, 1], -Sigma_1[..., 0, 1],
+                               -Sigma_1[..., 1, 0], Sigma_1[..., 0, 0]),
+                              dim=-1).reshape(-1, 2, 2)
+    ######
+    if torch.isnan(Sigma_1).any() or torch.isinf(Sigma_1).any():
+        print (100*'*')
+        print("Sigma_1 has NaN/Inf")
+    if (Sigma_1.det() <= 0).any():
+        print (100*'#')
+        print("Sigma_1 determinant non-positive!")
+
+    try :
+        Sigma_1_inv = Sigma_1_inv / Sigma_1.det().unsqueeze(-1).unsqueeze(-1)
+    except :
+        print ("Sigma: ", Sigma_1)
+        print ("Sigma_1_inv: ", Sigma_1_inv)
+        print ("Simga_1_det: ", Sigma_1.det())
+
+    dxy = (xy_1 - xy_2).unsqueeze(-1)
+    xy_distance = 0.5 * dxy.permute(0, 2, 1).bmm(Sigma_1_inv).bmm(dxy).view(-1)
+
+    whr_distance = 0.5 * Sigma_1_inv.bmm(Sigma_2).diagonal(
+        dim1=-2, dim2=-1).sum(dim=-1)
+
+    Sigma_1_det_log = Sigma_1.det().log()
+    Sigma_2_det_log = Sigma_2.det().log()
+    whr_distance = whr_distance + 0.5 * (Sigma_1_det_log - Sigma_2_det_log)
+    whr_distance = whr_distance - 1
+
+    distance = (xy_distance / (alpha * alpha) + whr_distance)
+
+    if sqrt:
+        distance = distance.clamp(1e-7).sqrt()
+    distance = distance.reshape(return_shape)
+
+    return postprocess(distance, fun=fun, tau=tau)
+
+
+
+if __name__ == "__main__":
+    x = torch.rand(10, 4)
+    y = torch.rand(10,4)
+    #import ipdb;ipdb.set_trace()
+    #cxy = ciou(x, y)
+    #dxy = diou(x, y)
+    #print(cxy.shape, dxy.shape)
+'''

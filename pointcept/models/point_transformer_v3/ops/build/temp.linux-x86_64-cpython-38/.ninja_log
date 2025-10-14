@@ -1,0 +1,7 @@
+# ninja log v7
+2	5598	1756948378496727246	/nas2/YJ/git/DINO_OBB/models/dino/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/DINO_OBB/models/dino/ops/src/cpu/ms_deform_attn_cpu.o	3e4687536fd57a41
+5	19596	1756948378496727246	/nas2/YJ/git/DINO_OBB/models/dino/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/DINO_OBB/models/dino/ops/src/vision.o	86000c653b1419ab
+4	32195	1756948378496727246	/nas2/YJ/git/DINO_OBB/models/dino/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/DINO_OBB/models/dino/ops/src/cuda/ms_deform_attn_cuda.o	40f35e18f327238a
+4	4521	1758550693974006430	/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/src/cpu/ms_deform_attn_cpu.o	ae880f862e3b0d76
+6	12844	1758550693974006430	/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/src/cuda/ms_deform_attn_cuda.o	e3de527e3560fc25
+7	13651	1758550693974006430	/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/build/temp.linux-x86_64-cpython-38/nas2/YJ/git/Fusion/pointcept/models/point_transformer_v3/ops/src/vision.o	234c05237ca34096
